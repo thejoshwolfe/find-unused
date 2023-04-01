@@ -18,29 +18,33 @@ pub fn main() !void {
 const buffer_size = 0x100_000;
 const min_unit_size = 0x10_000;
 
-const State = union(enum) {
+const State = enum {
     outside_node,
-    inside_node,
+    node,
     node_id,
     node_kind,
-    //node_loc,
-    //node_loc_file,
-    //node_loc_line,
-    //node_loc_col,
 
-    node_ignore: u8,
+    node_loc,
+    node_loc_file,
+    node_loc_line,
+    node_loc_col,
+
+    node_is_used,
+
+    ignore, // uses .ignore_depth and .next_state
+    expect_object, // uses .next_state
 
     inner,
 };
 
 /// Clang AST Node
 const Node = struct {
-    id: ?[]const u8 = null,
-    kind: ?[]const u8 = null,
-    //file: ?[]const u8 = null,
-    //line: ?[]const u8 = null,
-    //col: ?[]const u8 = null,
-    //is_used: bool = false,
+    id: []const u8 = "",
+    kind: []const u8 = "",
+    file: []const u8 = "",
+    line: []const u8 = "",
+    col: []const u8 = "",
+    is_used: bool = false,
 };
 
 const ClangAstScanner = struct {
@@ -52,6 +56,8 @@ const ClangAstScanner = struct {
     column_number: u32 = 1,
 
     state: State = .outside_node,
+    next_state: State = undefined,
+    ignore_depth: u8 = undefined,
 
     node: Node = .{},
     node_count: u32 = 0,
@@ -129,7 +135,7 @@ const ClangAstScanner = struct {
             .outside_node => {
                 switch (token) {
                     .ObjectBegin => {
-                        self.state = .inside_node;
+                        self.state = .node;
                     },
                     .ArrayEnd, .ObjectEnd => {
                         // Exiting an "inner" group.
@@ -137,7 +143,7 @@ const ClangAstScanner = struct {
                     else => return error.ExpectedNode,
                 }
             },
-            .inside_node => {
+            .node => {
                 switch (token) {
                     .ObjectEnd => {
                         try self.flushNode();
@@ -151,12 +157,16 @@ const ClangAstScanner = struct {
                             self.state = .node_id;
                         } else if (std.mem.eql(u8, key, "kind")) {
                             self.state = .node_kind;
+                        } else if (std.mem.eql(u8, key, "loc")) {
+                            self.expectObject(.node_loc);
+                        } else if (std.mem.eql(u8, key, "isUsed")) {
+                            self.state = .node_is_used;
                         } else if (std.mem.eql(u8, key, "inner")) {
                             // "inner" is *always* the last property (if present), so we can correctly flush now.
                             try self.flushNode();
                             self.state = .inner;
                         } else {
-                            self.state = .{ .node_ignore = 0 };
+                            self.ignoreValue();
                         }
                     },
                     else => unreachable,
@@ -165,29 +175,72 @@ const ClangAstScanner = struct {
 
             .node_id => {
                 self.node.id = try self.expectSlice(token);
-                self.state = .inside_node;
+                self.state = .node;
             },
             .node_kind => {
                 self.node.kind = try self.expectSlice(token);
-                self.state = .inside_node;
+                self.state = .node;
+            },
+            .node_is_used => {
+                self.node.is_used = try self.expectBool(token);
+                self.state = .node;
             },
 
-            .node_ignore => |depth| {
+            .node_loc => {
+                switch (token) {
+                    .ObjectEnd => {
+                        self.state = .node;
+                    },
+                    .String => |string_token| {
+                        if (string_token.escapes != .None) return error.UnsupportedObjectKeyEscapes;
+                        const key = self.tokenSlice(string_token);
+
+                        if (std.mem.eql(u8, key, "file")) {
+                            self.state = .node_loc_file;
+                        } else if (std.mem.eql(u8, key, "line")) {
+                            self.state = .node_loc_line;
+                        } else if (std.mem.eql(u8, key, "col")) {
+                            self.state = .node_loc_col;
+                        } else {
+                            self.ignoreValue();
+                        }
+                    },
+                    else => unreachable,
+                }
+            },
+            .node_loc_file => {
+                self.node.file = try self.expectSlice(token);
+                self.state = .node_loc;
+            },
+            .node_loc_line => {
+                self.node.line = try self.expectSlice(token);
+                self.state = .node_loc;
+            },
+            .node_loc_col => {
+                self.node.col = try self.expectSlice(token);
+                self.state = .node_loc;
+            },
+
+            .expect_object => {
+                if (token != .ObjectBegin) return error.ExpectedObject;
+                self.nextState();
+            },
+            .ignore => {
                 switch (token) {
                     .ObjectBegin, .ArrayBegin => {
-                        self.state = .{ .node_ignore = depth + 1 };
+                        self.ignore_depth += 1;
                     },
                     .ObjectEnd, .ArrayEnd => {
-                        if (depth <= 1) {
-                            self.state = .inside_node;
+                        if (self.ignore_depth <= 1) {
+                            self.nextState();
                         } else {
-                            self.state = .{ .node_ignore = depth - 1 };
+                            self.ignore_depth -= 1;
                         }
                     },
                     else => {
-                        if (depth == 0) {
+                        if (self.ignore_depth == 0) {
                             // The ignored value was a primitive.
-                            self.state = .inside_node;
+                            self.nextState();
                         }
                     },
                 }
@@ -200,10 +253,26 @@ const ClangAstScanner = struct {
         }
     }
 
+    fn ignoreValue(self: *@This()) void {
+        self.next_state = self.state;
+        self.state = .ignore;
+        self.ignore_depth = 0;
+    }
+
+    fn expectObject(self: *@This(), next_state: State) void {
+        self.next_state = next_state;
+        self.state = .expect_object;
+    }
+    fn nextState(self: *@This()) void {
+        self.state = self.next_state;
+        self.next_state = undefined;
+        self.ignore_depth = undefined;
+    }
+
     fn flushNode(self: *@This()) !void {
+        try UnusedFinder.handleNode(undefined, self.node);
         self.node = .{};
         self.node_count += 1;
-        std.debug.print("\r{}", .{self.node_count});
     }
 
     fn expectSlice(self: @This(), token: Token) ![]const u8 {
@@ -215,5 +284,30 @@ const ClangAstScanner = struct {
     }
     fn tokenSlice(self: @This(), string_or_number_token: anytype) []const u8 {
         return string_or_number_token.slice(self.buffer[0..], self.read_cursor - 1);
+    }
+
+    fn expectBool(self: @This(), token: Token) !bool {
+        _ = self;
+        switch (token) {
+            .True => return true,
+            .False => return false,
+            else => return error.ExpectedBool,
+        }
+    }
+};
+
+const UnusedFinder = struct {
+    fn handleNode(self: *@This(), node: Node) !void {
+        _ = self;
+        var buf: [0x1000]u8 = undefined;
+        var fixed_stream = std.io.fixedBufferStream(&buf);
+        var out = fixed_stream.writer();
+        try std.fmt.format(out, "{} {s}:{s}:{s}\n", .{
+            @boolToInt(node.is_used),
+            node.file,
+            node.line,
+            node.col,
+        });
+        try std.io.getStdOut().writer().writeAll(fixed_stream.getWritten());
     }
 };
