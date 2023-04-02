@@ -6,7 +6,11 @@ pub fn main() !void {
     var input_file = try std.fs.openFileAbsolute("/home/josh/tmp/ast.json", .{});
     const input = input_file.reader();
 
-    var scanner = ClangAstScanner{};
+    var finder = UnusedFinder{
+        .project_root = "/home/josh/dev/prometheus-cpp",
+        .effective_cwd = "/home/josh/dev/prometheus-cpp/build",
+    };
+    var scanner = ClangAstScanner{ .downstream = &finder };
     scanner.consume(input) catch |err| {
         std.debug.print("line,col: {},{}\n", .{ scanner.line_number, scanner.column_number });
         return err;
@@ -48,6 +52,8 @@ const Node = struct {
 };
 
 const ClangAstScanner = struct {
+    downstream: *UnusedFinder,
+
     write_cursor: u32 = 0,
     read_cursor: u32 = 0,
     input_at_eof: bool = false,
@@ -270,7 +276,7 @@ const ClangAstScanner = struct {
     }
 
     fn flushNode(self: *@This()) !void {
-        try UnusedFinder.handleNode(undefined, self.node);
+        try self.downstream.handleNode(self.node);
         self.node = .{};
         self.node_count += 1;
     }
@@ -296,18 +302,83 @@ const ClangAstScanner = struct {
     }
 };
 
+const kinds_of_interest = std.ComptimeStringMap(void, .{
+    .{"CXXMethodDecl"},
+    .{"FunctionDecl"},
+    .{"CXXConstructorDecl"},
+    .{"CXXConversionDecl"},
+});
+
 const UnusedFinder = struct {
+    project_root: []const u8,
+    effective_cwd: []const u8,
+
+    _current_file_buf: [4096]u8 = undefined,
+    current_file: []const u8 = "",
+    _current_line_buf: [16]u8 = undefined,
+    current_line: []const u8 = "",
     fn handleNode(self: *@This(), node: Node) !void {
-        _ = self;
+        // We need to record the current source position, because it might be omitted from later nodes.
+        try self.recordLocInfo(node);
+
+        if (!kinds_of_interest.has(node.kind)) return;
+
+        const col = node.col;
+
+        if (self.current_file.len == 0 or self.current_line.len == 0 or col.len == 0) {
+            // Nodes without loc info are out of scope for this analysis.
+            // e.g. compiler builtins.
+            return;
+        }
+
         var buf: [0x1000]u8 = undefined;
         var fixed_stream = std.io.fixedBufferStream(&buf);
         var out = fixed_stream.writer();
         try std.fmt.format(out, "{} {s}:{s}:{s}\n", .{
             @boolToInt(node.is_used),
-            node.file,
-            node.line,
+            self.current_file,
+            self.current_line,
             node.col,
         });
         try std.io.getStdOut().writer().writeAll(fixed_stream.getWritten());
+    }
+
+    fn recordLocInfo(self: *@This(), node: Node) !void {
+        if (node.file.len > 0) {
+            // Resolve the path to the canonical form that we want.
+            var buf: [0x2000]u8 = undefined;
+            var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&buf);
+            var allocator = fixed_buffer_allocator.allocator();
+
+            var file = node.file;
+            if (!std.fs.path.isAbsolute(file)) {
+                file = try std.fs.path.join(allocator, &[_][]const u8{self.effective_cwd, file});
+            }
+            file = try std.fs.path.relative(allocator, self.project_root, file);
+
+            // Determine if we care about nodes from this file.
+            var in_scope: bool = undefined;
+            if (std.mem.startsWith(u8, file, "../")) {
+                in_scope = false;
+            } else {
+                // TODO: exclude vendored dependencies here.
+                in_scope = true;
+            }
+            if (!in_scope) {
+                file = "";
+            }
+
+            // Save the canonicalized name, even if it's "".
+            try self.saveStr(file, &self._current_file_buf, &self.current_file);
+        }
+
+        if (self.current_file.len > 0 and node.line.len > 0) {
+            try self.saveStr(node.line, &self._current_line_buf, &self.current_line);
+        }
+    }
+    fn saveStr(_: @This(), src: []const u8, buf: anytype, dest_slice: *[]const u8) !void {
+        if (src.len > buf.len) return error.StringTooLong;
+        std.mem.copy(u8, buf, src);
+        dest_slice.* = buf[0..src.len];
     }
 };
