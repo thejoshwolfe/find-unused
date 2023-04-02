@@ -15,8 +15,6 @@ pub fn main() !void {
         std.debug.print("line,col: {},{}\n", .{ scanner.line_number, scanner.column_number });
         return err;
     };
-
-    std.debug.print("Done.\n", .{});
 }
 
 const buffer_size = 0x100_000;
@@ -281,18 +279,18 @@ const ClangAstScanner = struct {
         self.node_count += 1;
     }
 
-    fn expectSlice(self: @This(), token: Token) ![]const u8 {
+    fn expectSlice(self: *const @This(), token: Token) ![]const u8 {
         switch (token) {
             .String => |string_token| return self.tokenSlice(string_token),
             .Number => |number_token| return self.tokenSlice(number_token),
             else => return error.ExpectedStringOrNumber,
         }
     }
-    fn tokenSlice(self: @This(), string_or_number_token: anytype) []const u8 {
+    fn tokenSlice(self: *const @This(), string_or_number_token: anytype) []const u8 {
         return string_or_number_token.slice(self.buffer[0..], self.read_cursor - 1);
     }
 
-    fn expectBool(self: @This(), token: Token) !bool {
+    fn expectBool(self: *const @This(), token: Token) !bool {
         _ = self;
         switch (token) {
             .True => return true,
@@ -376,7 +374,7 @@ const UnusedFinder = struct {
             try self.saveStr(node.line, &self._current_line_buf, &self.current_line);
         }
     }
-    fn saveStr(_: @This(), src: []const u8, buf: anytype, dest_slice: *[]const u8) !void {
+    fn saveStr(_: *const @This(), src: []const u8, buf: anytype, dest_slice: *[]const u8) !void {
         if (src.len > buf.len) return error.StringTooLong;
         std.mem.copy(u8, buf, src);
         dest_slice.* = buf[0..src.len];
