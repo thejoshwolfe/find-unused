@@ -289,10 +289,11 @@ const ClangAstScanner = struct {
 };
 
 const kinds_of_interest = std.ComptimeStringMap(void, .{
-    .{"CXXMethodDecl"},
     .{"FunctionDecl"},
+    .{"CXXMethodDecl"},
     .{"CXXConstructorDecl"},
     .{"CXXConversionDecl"},
+    // (It's hard to imagine a scenario when it's useful to know that a destructor is unused.)
 });
 
 const UnusedFinder = struct {
@@ -317,7 +318,9 @@ const UnusedFinder = struct {
             return;
         }
         if (node.is_implicit) {
-            // Implicit nodes are things like default constructors and the invoke method of lambda expressions.
+            // Implicit nodes are things like default constructors and the __invoke method of lambda expressions.
+            // (Note that lambda expressions *do* get analyzed, because they contain a class with an operator() method,
+            //  and that method is *not* implicit.)
             return;
         }
 
