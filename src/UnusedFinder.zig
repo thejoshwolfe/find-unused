@@ -5,6 +5,8 @@ const assert = std.debug.assert;
 const ClangAstNode = @import("./ClangAstNode.zig");
 const StringPool = @import("./StringPool.zig");
 
+const UnusedFinder = @This();
+
 // config:
 allocator: Allocator,
 /// Only source files somewhere within this dir are considered in scope.
@@ -36,13 +38,25 @@ pub fn deinit(self: *@This()) void {
 
 /// Order is undefined.
 pub fn iterator(self: *const @This()) Iterator {
-    return .{ .it = self.strings.dedup_table.keyIterator() };
+    return .{
+        .finder = self,
+        .it = self.strings.dedup_table.keyIterator(),
+    };
 }
 pub const Iterator = struct {
+    finder: *const UnusedFinder,
     it: @TypeOf(@as(StringPool, undefined).dedup_table).KeyIterator,
-    pub fn next(self: *@This()) ?u32 {
-        return (self.it.next() orelse return null).*;
+    pub fn next(self: *@This()) ?Record {
+        const loc_i = self.it.next() orelse return null;
+        return .{
+            .loc = self.finder.strings.getString(loc_i.*),
+            .is_used = self.finder.used_locs.contains(loc_i.*),
+        };
     }
+};
+pub const Record = struct {
+    loc: []const u8,
+    is_used: bool,
 };
 
 const kinds_of_interest = std.ComptimeStringMap(void, .{

@@ -35,13 +35,10 @@ pub fn main() !void {
 
     // Report some stuff.
     var it = finder.iterator();
-    while (it.next()) |loc_i| {
-        const is_used = finder.used_locs.contains(loc_i);
-        const loc_str = finder.strings.getString(loc_i);
-
+    while (it.next()) |record| {
         std.debug.print("{} {s}\n", .{
-            @boolToInt(is_used),
-            loc_str,
+            @boolToInt(record.is_used),
+            record.loc,
         });
     }
 }
