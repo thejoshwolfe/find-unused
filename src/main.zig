@@ -1,20 +1,47 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const StreamingParser = std.json.StreamingParser;
 const Token = std.json.Token;
+const StringPool = @import("./StringPool.zig");
 
 pub fn main() !void {
+    var _gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer {
+        if (_gpa.deinit()) {
+            std.debug.print("WARNING: memory leaks\n", .{});
+        }
+    }
+    const gpa = _gpa.allocator();
+
     var input_file = try std.fs.openFileAbsolute("/home/josh/tmp/ast.json", .{});
+    defer input_file.close();
     const input = input_file.reader();
 
     var finder = UnusedFinder{
+        .allocator = gpa,
         .project_root = "/home/josh/dev/prometheus-cpp",
         .effective_cwd = "/home/josh/dev/prometheus-cpp/build",
     };
+    defer finder.deinit();
+
     var scanner = ClangAstScanner{ .downstream = &finder };
     scanner.consume(input) catch |err| {
         std.debug.print("line,col: {},{}\n", .{ scanner.line_number, scanner.column_number });
         return err;
     };
+
+    // Report some stuff.
+    var it = finder.iterator();
+    while (it.next()) |loc_i| {
+        const is_used = finder.used_locs.contains(loc_i);
+        const loc_str = finder.strings.getString(loc_i);
+
+        std.debug.print("{} {s}\n", .{
+            @boolToInt(is_used),
+            loc_str,
+        });
+    }
 }
 
 const buffer_size = 0x100_000;
@@ -40,6 +67,7 @@ const Node = struct {
     file: []const u8 = "",
     line: []const u8 = "",
     col: []const u8 = "",
+    previous_decl: []const u8 = "",
     is_implicit: bool = false,
     is_used: bool = false,
 };
@@ -66,7 +94,7 @@ const ClangAstScanner = struct {
     tokenizer: StreamingParser = StreamingParser.init(),
     buffer: [buffer_size]u8 = undefined,
 
-    fn consume(self: *@This(), input: anytype) !void {
+    pub fn consume(self: *@This(), input: anytype) !void {
         while (true) {
             if (self.write_cursor - self.read_cursor < min_unit_size and self.state == .outside_node) {
                 // Not enough buffered.
@@ -164,6 +192,8 @@ const ClangAstScanner = struct {
                             self.expectBool(&self.node.is_used);
                         } else if (std.mem.eql(u8, key, "isImplicit")) {
                             self.expectBool(&self.node.is_implicit);
+                        } else if (std.mem.eql(u8, key, "previousDecl")) {
+                            self.expectSlice(&self.node.previous_decl);
                         } else if (std.mem.eql(u8, key, "inner")) {
                             // "inner" is *always* the last property (if present), so we can correctly flush now.
                             try self.flushNode();
@@ -297,14 +327,41 @@ const kinds_of_interest = std.ComptimeStringMap(void, .{
 });
 
 const UnusedFinder = struct {
+    // config
+    allocator: Allocator,
     project_root: []const u8,
     effective_cwd: []const u8,
 
+    // tables of info
+    strings: StringPool = .{},
+    id_to_loc: std.AutoHashMapUnmanaged(u64, u32) = .{},
+    used_locs: std.AutoHashMapUnmanaged(u32, void) = .{},
+
+    // bookkeeping buffers
     _current_file_buf: [4096]u8 = undefined,
     current_file: []const u8 = "",
     _current_line_buf: [16]u8 = undefined,
     current_line: []const u8 = "",
-    fn handleNode(self: *@This(), node: Node) !void {
+
+    pub fn deinit(self: *@This()) void {
+        self.strings.deinit(self.allocator);
+        self.id_to_loc.deinit(self.allocator);
+        self.used_locs.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    /// Order is undefined.
+    pub fn iterator(self: *const @This()) Iterator {
+        return .{ .it = self.strings.dedup_table.keyIterator() };
+    }
+    pub const Iterator = struct {
+        it: @TypeOf(@as(StringPool, undefined).dedup_table).KeyIterator,
+        fn next(self: *@This()) ?u32 {
+            return (self.it.next() orelse return null).*;
+        }
+    };
+
+    pub fn handleNode(self: *@This(), node: Node) !void {
         // We need to record the current source position, because it might be omitted from later nodes.
         try self.recordLocInfo(node);
 
@@ -324,16 +381,29 @@ const UnusedFinder = struct {
             return;
         }
 
-        var buf: [0x1000]u8 = undefined;
-        var fixed_stream = std.io.fixedBufferStream(&buf);
-        var out = fixed_stream.writer();
-        try std.fmt.format(out, "{} {s}:{s}:{s}\n", .{
-            @boolToInt(node.is_used),
-            self.current_file,
-            self.current_line,
-            node.col,
-        });
-        try std.io.getStdOut().writer().writeAll(fixed_stream.getWritten());
+        const id = try std.fmt.parseInt(u64, node.id, 0);
+
+        var loc_i: u32 = undefined;
+        if (node.previous_decl.len > 0) {
+            // This is the definition of a previously prototyped function.
+            // Use the prototype location as the true location.
+            const previous_id = try std.fmt.parseInt(u64, node.previous_decl, 0);
+            loc_i = self.id_to_loc.get(previous_id) orelse return error.PreviouslDeclNotFound;
+        } else {
+            // New location.
+            var loc_buf: [0x1000]u8 = undefined;
+            const loc_str = try std.fmt.bufPrint(loc_buf[0..], "{s}:{s}:{s}", .{
+                self.current_file,
+                self.current_line,
+                node.col,
+            });
+            loc_i = try self.strings.putString(self.allocator, loc_str);
+        }
+        try self.id_to_loc.putNoClobber(self.allocator, id, loc_i);
+
+        if (node.is_used) {
+            _ = try self.used_locs.put(self.allocator, loc_i, {});
+        }
     }
 
     fn recordLocInfo(self: *@This(), node: Node) !void {
@@ -345,7 +415,7 @@ const UnusedFinder = struct {
 
             var file = node.file;
             if (!std.fs.path.isAbsolute(file)) {
-                file = try std.fs.path.join(allocator, &[_][]const u8{self.effective_cwd, file});
+                file = try std.fs.path.join(allocator, &[_][]const u8{ self.effective_cwd, file });
             }
             file = try std.fs.path.relative(allocator, self.project_root, file);
 
