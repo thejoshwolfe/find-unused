@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const StreamingParser = std.json.StreamingParser;
 const Token = std.json.Token;
@@ -22,6 +23,10 @@ pub fn main() !void {
         .allocator = gpa,
         .project_root = "/home/josh/dev/prometheus-cpp",
         .effective_cwd = "/home/josh/dev/prometheus-cpp/build",
+        .third_party_paths_in_project_root = &[_][]const u8{
+            "3rdparty/civetweb",
+            "3rdparty/googletest",
+        },
     };
     defer finder.deinit();
 
@@ -327,10 +332,17 @@ const kinds_of_interest = std.ComptimeStringMap(void, .{
 });
 
 const UnusedFinder = struct {
-    // config
+
+    // config:
     allocator: Allocator,
+    /// Only source files somewhere within this dir are considered in scope.
     project_root: []const u8,
+    /// Typically "build", e.g. for the cmake build dir.
+    /// Used in case the compiler refers to non-absolute file paths.
     effective_cwd: []const u8,
+    /// Optional list of roots of third-party projects within the project_root.
+    /// Source files within these directories are considered out of scope.
+    third_party_paths_in_project_root: []const []const u8 = &[_][]const u8{},
 
     // tables of info
     strings: StringPool = .{},
@@ -420,12 +432,16 @@ const UnusedFinder = struct {
             file = try std.fs.path.relative(allocator, self.project_root, file);
 
             // Determine if we care about nodes from this file.
-            var in_scope: bool = undefined;
+            var in_scope = true;
             if (std.mem.startsWith(u8, file, "../")) {
                 in_scope = false;
             } else {
-                // TODO: exclude vendored dependencies here.
-                in_scope = true;
+                for (self.third_party_paths_in_project_root) |third_party_root| {
+                    if (normalizedPathStartsWith(file, third_party_root)) {
+                        in_scope = false;
+                        break;
+                    }
+                }
             }
             if (!in_scope) {
                 file = "";
@@ -445,3 +461,16 @@ const UnusedFinder = struct {
         dest_slice.* = buf[0..src.len];
     }
 };
+
+/// Seems like this could go in the std lib.
+/// Both paths must be normalized and either both be absolute or both be relative.
+fn normalizedPathStartsWith(descendent: []const u8, ancestor: []const u8) bool {
+    assert(ancestor.len > 0 and descendent.len > 0);
+    assert(std.fs.path.isAbsolute(ancestor) == std.fs.path.isAbsolute(descendent)); // can't compare abs vs rel.
+    assert(ancestor[ancestor.len - 1] != '/'); // ancestor must be normalized to not end with a '/'.
+    if (ancestor.len < descendent.len) {
+        return std.mem.startsWith(u8, descendent, ancestor) and descendent[ancestor.len] == '/';
+    }
+    if (ancestor.len > descendent.len) return false;
+    return std.mem.eql(u8, ancestor, descendent);
+}

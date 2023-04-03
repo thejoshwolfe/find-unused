@@ -43,8 +43,8 @@ const Context = struct {
     pub fn hash(self: @This(), k: u32) u64 {
         return std.hash.Wyhash.hash(0, self.pool.getString(k));
     }
-    pub fn eql(_: @This(), _: u32, _: u32) bool {
-        unreachable; // unused.
+    pub fn eql(_: @This(), a: u32, b: u32) bool {
+        return a == b;
     }
 };
 const AdaptedContext = struct {
