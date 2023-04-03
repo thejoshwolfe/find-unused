@@ -1,0 +1,8 @@
+id: []const u8 = "",
+kind: []const u8 = "",
+file: []const u8 = "",
+line: []const u8 = "",
+col: []const u8 = "",
+previous_decl: []const u8 = "",
+is_implicit: bool = false,
+is_used: bool = false,
