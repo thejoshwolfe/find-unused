@@ -12,9 +12,26 @@ pub fn main() !void {
     }
     const gpa = _gpa.allocator();
 
-    var input_file = try std.fs.openFileAbsolute("/home/josh/tmp/ast.json", .{});
-    defer input_file.close();
-    const input = input_file.reader();
+    var clang_cmd = std.ArrayList([]const u8).init(gpa);
+    defer clang_cmd.deinit();
+
+    var args = std.process.args();
+    _ = args.next();
+    while (args.next()) |arg| {
+        try clang_cmd.append(arg);
+    }
+    try clang_cmd.appendSlice(&[_][]const u8{
+        "-Wno-everything",
+        "-Xclang",
+        "-ast-dump=json",
+    });
+
+    var clang = std.ChildProcess.init(clang_cmd.items, gpa);
+
+    clang.stdout_behavior = .Pipe;
+    try clang.spawn();
+
+    const input = clang.stdout.?.reader();
 
     var finder = UnusedFinder{
         .allocator = gpa,
@@ -32,6 +49,11 @@ pub fn main() !void {
         std.debug.print("line,col: {},{}\n", .{ scanner.line_number, scanner.column_number });
         return err;
     };
+
+    switch (try clang.wait()) {
+        .Exited => |code| if (code != 0) return error.ChildProcessError,
+        else => return error.ChildProcessError,
+    }
 
     // Report some stuff.
     var it = finder.iterator();
