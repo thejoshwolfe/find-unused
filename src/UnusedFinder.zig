@@ -7,16 +7,23 @@ const StringPool = @import("./StringPool.zig");
 
 const UnusedFinder = @This();
 
-// config:
+pub const Config = struct {
+    /// Only source files somewhere within this dir are considered in scope.
+    /// This must be an absolute, normalized path.
+    project_root: []const u8,
+    /// The directory the compiler executes in.
+    /// Used in case the compiler refers to non-absolute file paths.
+    /// This must be an absolute, normalized path.
+    build_dir: []const u8,
+    /// Optional list of roots of third-party projects within the project_root.
+    /// Source files within these directories are considered out of scope.
+    /// Must be normalized relative paths within the project root.
+    third_party_paths_in_project_root: []const []const u8 = &[_][]const u8{},
+};
+
+// supply these:
 allocator: Allocator,
-/// Only source files somewhere within this dir are considered in scope.
-project_root: []const u8,
-/// Typically "build", e.g. for the cmake build dir.
-/// Used in case the compiler refers to non-absolute file paths.
-effective_cwd: []const u8,
-/// Optional list of roots of third-party projects within the project_root.
-/// Source files within these directories are considered out of scope.
-third_party_paths_in_project_root: []const []const u8 = &[_][]const u8{},
+config: Config,
 
 // tables of info
 strings: StringPool = .{},
@@ -121,16 +128,16 @@ fn recordLocInfo(self: *@This(), node: ClangAstNode) !void {
 
         var file = node.file;
         if (!std.fs.path.isAbsolute(file)) {
-            file = try std.fs.path.join(allocator, &[_][]const u8{ self.effective_cwd, file });
+            file = try std.fs.path.join(allocator, &[_][]const u8{ self.config.build_dir, file });
         }
-        file = try std.fs.path.relative(allocator, self.project_root, file);
+        file = try std.fs.path.relative(allocator, self.config.project_root, file);
 
         // Determine if we care about nodes from this file.
         var in_scope = true;
         if (std.mem.startsWith(u8, file, "../")) {
             in_scope = false;
         } else {
-            for (self.third_party_paths_in_project_root) |third_party_root| {
+            for (self.config.third_party_paths_in_project_root) |third_party_root| {
                 if (normalizedPathStartsWith(file, third_party_root)) {
                     in_scope = false;
                     break;
