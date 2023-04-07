@@ -19,8 +19,37 @@ pub const Config = struct {
     /// Source files within these directories are considered out of scope.
     /// Must be normalized relative paths within the project root.
     third_party_paths_in_project_root: []const []const u8 = &[_][]const u8{},
-};
 
+    /// Resolves the given file to be relative to the project_root.
+    /// Non-absolute input paths are resolved relative to build_dir.
+    /// Returns "" if this file is out of scope.
+    /// Allocations made with the given allocator are leaked;
+    /// use an arena or other coarse bookkeeping to clean up the memory allocated by this function.
+    pub fn resolvePath(self: *const @This(), allocator: Allocator, file: []const u8) ![]const u8 {
+        var result = file;
+        if (!std.fs.path.isAbsolute(file)) {
+            result = try std.fs.path.join(allocator, &[_][]const u8{ self.build_dir, result });
+        }
+        result = try std.fs.path.relative(allocator, self.project_root, result);
+
+        // Determine if we care about nodes from this file.
+        var in_scope = true;
+        if (std.mem.startsWith(u8, result, "../")) {
+            in_scope = false;
+        } else {
+            for (self.third_party_paths_in_project_root) |third_party_root| {
+                if (normalizedPathStartsWith(result, third_party_root)) {
+                    in_scope = false;
+                    break;
+                }
+            }
+        }
+        if (!in_scope) {
+            result = "";
+        }
+        return result;
+    }
+};
 // supply these:
 allocator: Allocator,
 config: Config,
@@ -126,27 +155,7 @@ fn recordLocInfo(self: *@This(), node: ClangAstNode) !void {
         var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&buf);
         var allocator = fixed_buffer_allocator.allocator();
 
-        var file = node.file;
-        if (!std.fs.path.isAbsolute(file)) {
-            file = try std.fs.path.join(allocator, &[_][]const u8{ self.config.build_dir, file });
-        }
-        file = try std.fs.path.relative(allocator, self.config.project_root, file);
-
-        // Determine if we care about nodes from this file.
-        var in_scope = true;
-        if (std.mem.startsWith(u8, file, "../")) {
-            in_scope = false;
-        } else {
-            for (self.config.third_party_paths_in_project_root) |third_party_root| {
-                if (normalizedPathStartsWith(file, third_party_root)) {
-                    in_scope = false;
-                    break;
-                }
-            }
-        }
-        if (!in_scope) {
-            file = "";
-        }
+        var file = try self.config.resolvePath(allocator, node.file);
 
         // Save the canonicalized name, even if it's "".
         try self.saveStr(file, &self.current_file_buf, &self.current_file);

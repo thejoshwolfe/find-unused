@@ -2,6 +2,7 @@ const std = @import("std");
 
 const UnusedFinder = @import("./UnusedFinder.zig");
 const ClangAstScanner = @import("./ClangAstScanner.zig");
+const parseClangCli = @import("./clang_cli_parser.zig").parseClangCli;
 
 pub fn main() !void {
     var _gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -53,13 +54,19 @@ pub fn main() !void {
     while (args.next()) |arg| {
         try clang_cmd.append(arg);
     }
-    if (clang_cmd.items.len < 2) printUsage("expected clang compile command after --");
+    const clang_parameters = parseClangCli(clang_cmd.items) orelse printUsage("expected clang compile command after '--'");
+    if (!clang_parameters.is_compile) printUsage("clang command isn't a compile command?");
+
+    if ((try config.resolvePath(config_arena, clang_parameters.source_file)).len == 0) printUsage("source file is out of scope");
+    const _output_file = try std.fs.path.join(config_arena, &[_][]const u8{ config.build_dir, clang_parameters.output_file });
+    const cache_file = try std.mem.concat(config_arena, u8, &[_][]const u8{ _output_file, ".cache" });
+    const cache_file_tmp = try std.mem.concat(config_arena, u8, &[_][]const u8{ cache_file, ".tmp" });
+
     try clang_cmd.appendSlice(&[_][]const u8{
         "-Wno-everything",
         "-Xclang",
         "-ast-dump=json",
     });
-
     var clang = std.ChildProcess.init(clang_cmd.items, gpa);
     clang.stdout_behavior = .Pipe;
     clang.cwd = config.build_dir;
@@ -83,13 +90,19 @@ pub fn main() !void {
     }
 
     // Report some stuff.
-    var it = finder.iterator();
-    while (it.next()) |record| {
-        std.debug.print("{} {s}\n", .{
-            @boolToInt(record.is_used),
-            record.loc,
-        });
+    {
+        var output_file = try std.fs.createFileAbsolute(cache_file_tmp, .{});
+        defer output_file.close();
+        const writer = output_file.writer();
+        var it = finder.iterator();
+        while (it.next()) |record| {
+            try writer.print("{} {s}\n", .{
+                @boolToInt(record.is_used),
+                record.loc,
+            });
+        }
     }
+    try std.os.rename(cache_file_tmp, cache_file);
 }
 
 fn normalize(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
