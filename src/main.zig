@@ -7,6 +7,7 @@ const parseClangCli = @import("./clang_cli_parser.zig").parseClangCli;
 const ClangCommand = @import("./clang_cli_parser.zig").ClangCommand;
 
 const BashParser = @import("./bash_parser.zig").BashParser;
+const StringPool = @import("./StringPool.zig");
 
 pub fn main() !void {
     var _gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -219,6 +220,7 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
         try analyzeBashScript(arena, sh_script, &clang_commands);
     }
 
+    // Analyze each clang command.
     var cache_files = std.ArrayList([]const u8).init(arena);
     for (clang_commands.items) |clang_command| {
         const cache_file = try analyzeClangCommand(gpa, config, trust_cache, clang_command) orelse continue;
@@ -226,9 +228,42 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
         try cache_files.append(cache_file);
     }
 
+    // Aggregate results from the cache files.
+    var strings = StringPool{};
+    defer strings.deinit(gpa);
+    var line = std.ArrayList(u8).init(gpa);
+    defer line.deinit();
+    var used_locs = std.AutoHashMap(u32, void).init(gpa);
+    defer used_locs.deinit();
     for (cache_files.items) |cache_file| {
-        std.debug.print("{s}\n", .{cache_file});
+        const file = try std.fs.openFileAbsolute(cache_file, .{});
+        var br = std.io.bufferedReader(file.reader());
+        const reader = br.reader();
+        while (true) {
+            reader.readUntilDelimiterArrayList(&line, '\n', 0x1000) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (!(line.items.len > 2 and line.items[1] == ' ')) return error.MalformedCacheFile;
+            var is_used = switch (line.items[0]) {
+                '0' => false,
+                '1' => true,
+                else => return error.MalformedCacheFile,
+            };
+            const loc_i = try strings.putString(gpa, line.items[2..]);
+            if (is_used) try used_locs.put(loc_i, {});
+        }
         gpa.destroy(cache_file);
+    }
+
+    var it = strings.dedup_table.keyIterator();
+    while (it.next()) |loc_i| {
+        const loc = strings.getString(loc_i.*);
+        const is_used = used_locs.contains(loc_i.*);
+        try std.io.getStdOut().writer().print("{} {s}\n", .{
+            @boolToInt(is_used),
+            loc,
+        });
     }
 }
 
