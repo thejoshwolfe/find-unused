@@ -130,7 +130,12 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
         // This is the definition of a previously prototyped function.
         // Use the prototype location as the true location.
         const previous_id = try std.fmt.parseInt(u64, node.previous_decl, 0);
-        loc_i = self.id_to_loc.get(previous_id) orelse return error.PreviouslDeclNotFound;
+        if (self.id_to_loc.get(previous_id)) |previous_loc_i| {
+            loc_i = previous_loc_i;
+        } else {
+            // Sometimes clang emits completely bogus dead pointers. Not even defined later.
+            // Just ignore them.
+        }
     } else {
         // New location.
         var loc_buf: [0x1000]u8 = undefined;
