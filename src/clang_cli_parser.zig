@@ -5,7 +5,6 @@ pub const ClangCommand = struct {
     /// TODO: there can sometimes be multiple source files.
     source_file: []const u8,
     output_file: []const u8,
-    is_compile: bool,
 };
 
 /// Parse some basic things out of a clang command.
@@ -18,12 +17,9 @@ pub fn parseClangCli(cmd: []const []const u8) ?ClangCommand {
 
     var source_file: ?[]const u8 = null;
     var output_file: ?[]const u8 = null;
-    var is_compile = false;
     for (cmd[0 .. cmd.len - 1], 0..) |arg, i| {
         if (std.mem.eql(u8, arg, "-o")) {
             output_file = cmd[i + 1];
-        } else if (std.mem.eql(u8, arg, "-c")) {
-            is_compile = true;
         }
     }
     // TODO: don't assume the source file is the last argument.
@@ -38,7 +34,6 @@ pub fn parseClangCli(cmd: []const []const u8) ?ClangCommand {
         .complete_cmd = cmd,
         .source_file = source_file.?,
         .output_file = output_file.?,
-        .is_compile = is_compile,
     };
 }
 

@@ -63,8 +63,10 @@ pub fn main() !void {
             try clang_cmd.append(arg);
         }
 
-        const cache_file = try analyzeClangCommand(gpa, config, clang_cmd.items) orelse {
-            printUsage("That's not an in-scope clang command.");
+        const cache_file = try analyzeClangCommand(gpa, config, parseClangCli(try clang_cmd.toOwnedSlice()) orelse {
+            printUsage("That's not a clang command.");
+        }) orelse {
+            printUsage("That clang command is out of scope.");
         };
         defer gpa.destroy(cache_file);
 
@@ -74,16 +76,13 @@ pub fn main() !void {
     }
 }
 
-fn analyzeClangCommand(gpa: std.mem.Allocator, config: UnusedFinder.Config, clang_cmd: []const []const u8) !?[]const u8 {
+fn analyzeClangCommand(gpa: std.mem.Allocator, config: UnusedFinder.Config, clang_command: ClangCommand) !?[]const u8 {
     var _arena = std.heap.ArenaAllocator.init(gpa);
     defer _arena.deinit();
     const arena = _arena.allocator();
 
-    const clang_parameters = parseClangCli(clang_cmd) orelse return null;
-    if (!clang_parameters.is_compile) return null;
-
-    if ((try config.resolvePath(arena, clang_parameters.source_file)).len == 0) return null;
-    const _output_file = try std.fs.path.join(arena, &[_][]const u8{ config.build_dir, clang_parameters.output_file });
+    if ((try config.resolvePath(arena, clang_command.source_file)).len == 0) return null;
+    const _output_file = try std.fs.path.join(arena, &[_][]const u8{ config.build_dir, clang_command.output_file });
     const cache_file = try std.mem.concat(gpa, u8, &[_][]const u8{ _output_file, ".find-unused-cache" });
     const cache_file_tmp = try std.mem.concat(arena, u8, &[_][]const u8{ cache_file, ".tmp" });
 
@@ -92,8 +91,8 @@ fn analyzeClangCommand(gpa: std.mem.Allocator, config: UnusedFinder.Config, clan
         "-Xclang",
         "-ast-dump=json",
     };
-    var ast_dump_cmd = try std.ArrayList([]const u8).initCapacity(arena, clang_cmd.len + additional_clang_args.len);
-    ast_dump_cmd.appendSliceAssumeCapacity(clang_cmd);
+    var ast_dump_cmd = try std.ArrayList([]const u8).initCapacity(arena, clang_command.complete_cmd.len + additional_clang_args.len);
+    ast_dump_cmd.appendSliceAssumeCapacity(clang_command.complete_cmd);
     ast_dump_cmd.appendSliceAssumeCapacity(additional_clang_args);
     var clang = std.ChildProcess.init(ast_dump_cmd.items, arena);
     clang.stdout_behavior = .Pipe;
@@ -184,12 +183,14 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config) !voi
         try analyzeBashScript(arena, sh_script, &clang_commands);
     }
 
+    var cache_files = std.ArrayList([]const u8).init(arena);
     for (clang_commands.items) |clang_command| {
-        std.debug.print("clang command:", .{});
-        for (clang_command.complete_cmd) |arg| {
-            std.debug.print(" {s}", .{arg});
-        }
-        std.debug.print("\n", .{});
+        try cache_files.append(try analyzeClangCommand(gpa, config, clang_command) orelse continue);
+    }
+
+    for (cache_files.items) |cache_file| {
+        std.debug.print("{s}\n", .{cache_file});
+        gpa.destroy(cache_file);
     }
 }
 
