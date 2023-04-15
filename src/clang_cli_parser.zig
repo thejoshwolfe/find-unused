@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const ClangCommand = struct {
+    complete_cmd: []const []const u8,
     /// TODO: there can sometimes be multiple source files.
     source_file: []const u8,
     output_file: []const u8,
@@ -34,6 +35,7 @@ pub fn parseClangCli(cmd: []const []const u8) ?ClangCommand {
 
     if (source_file == null or output_file == null) return null;
     return .{
+        .complete_cmd = cmd,
         .source_file = source_file.?,
         .output_file = output_file.?,
         .is_compile = is_compile,

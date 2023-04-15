@@ -5,23 +5,22 @@
 //! and to report an error when unsupported constructs are found.
 //!
 //! Supported constructs and transformations:
-//!  * comments
-//!  * lists (of pipelines)
-//!  * pipelines (partial support)
-//!  * simple commands (partial support)
+//!  * comments are ignored
+//!  * (lists of pipelines of) simple commands (partial support)
 //!  * word splitting
 //!  * quote removal
+//!
 //! Unsupported constructs and transformations:
 //!  * any command starting with a reserved word (with no quotes or backslashes): ! case coproc do done elif else esac fi for function if in select then until while { } time [[ ]]
 //!  * any occurrence of ( or ) except when inside 'single quotes' or "double quotes" or when prefixed by a \ .
 //!  * all compound commands (due to the above)
-//!  * pipelines that start with time (due to the above).
+//!  * pipelines that start with ! or time (due to the above).
 //!  * shell function definitions (due to the above)
 //!  * any occurrence of $ or ` except when inside 'single quotes' or when prefixed by \ . This means these are unsupported:
 //!      * variable, parameter, and arithmetic expansion
 //!      * command substitution
 //!      * $'string' with escape sequences
-//!      * $"string" locale translation
+//!      * $"string" with locale translation
 //!  * any occurrence of ~ at the start of a word or immediately following a : or = (except at the start of a word) outside 'single quotes' or "double quotes". This means this is unsupported:
 //!      * tilde expansion
 //!  * any occurrence of any of { * ? [ > or < except when inside 'single quotes' or "double quotes" or when prefixed by \ . This means these are unsupported:
@@ -29,13 +28,91 @@
 //!      * pathname expansion
 //!      * process substitution
 //!      * redirection (including here documents)
-//!  * any occurrence of ! except when inside 'single quotes' or when prefixed by \ or when immediately followed by space, tab, newline, carriage return, = , or EOF. This means these are unsupported:
-//!      * pipelines that start with !
-//!      * history expansion
+//!  * any occurrence of ! except when inside 'single quotes' or when prefixed by \ or when immediately followed by space, tab, newline, carriage return, = , or EOF. This means this is unsupported:
+//!      * history expansion (almost all of it)
+//!  * a ^ at the start of the first word of a command. This means this is unsupported:
+//!      * history expansion (the rest of it)
 //!  * any occurrence of = in the first word of a command except when inside 'single quotes' or "double quotes" or when prefixed by \ . This means this is unsupported:
 //!      * variable assignment
 
 const std = @import("std");
+
+pub const BashParser = struct {
+    arena: std.mem.Allocator,
+    tokenizer: BashTokenizer,
+
+    /// Note that this class leaks memory allocated with the given arena.
+    pub fn init(arena: std.mem.Allocator, source: []const u8) @This() {
+        return .{
+            .arena = arena,
+            .tokenizer = BashTokenizer.init(source),
+        };
+    }
+
+    /// If the returned .control_operator is .eof, then this is the end.
+    /// Subsequent calls will return an empty command with .control_operator = .eof forever.
+    pub fn nextSimpleCommand(self: *@This()) !BashCommand {
+        var cmd = std.ArrayList([]const u8).init(self.arena);
+        while (true) {
+            const token = try self.tokenizer.next();
+            switch (token) {
+                .bare_word => |content| {
+                    if (cmd.items.len == 0) {
+                        // Reject special bash things at the start of a command.
+                        // Note that these would _not_ be special as a quoted_word.
+                        if (reserved_words.has(content)) return error.UnsupportedReservedWord;
+                        if (content[0] == '^') return error.UnsupportedHistoryExpansion;
+                        if (std.mem.indexOfScalarPos(u8, content, 1, '=') != null) {
+                            return error.UnsupportedVariableAssignment;
+                        }
+                    }
+                    try cmd.append(content);
+                },
+                .quoted_word => |quoted_word| {
+                    // This allocates memory.
+                    try cmd.append(try removeQuotesAlloc(self.arena, quoted_word));
+                },
+                .pipe_pipe, .amp, .amp_amp, .semicolon, .pipe, .pipe_amp, .newline, .eof => {
+                    return .{
+                        .words = try cmd.toOwnedSlice(),
+                        .control_operator = token,
+                    };
+                },
+                .semicolon_semicolon, .semicolon_amp, .semicolon_semicolon_amp => return error.UnexpectedCaseControlOperator,
+            }
+        }
+    }
+};
+
+pub const BashCommand = struct {
+    words: []const []const u8,
+    control_operator: BashToken,
+};
+
+const reserved_words = std.ComptimeStringMap(void, .{
+    .{"!"},
+    .{"case"},
+    .{"coproc"},
+    .{"do"},
+    .{"done"},
+    .{"elif"},
+    .{"else"},
+    .{"esac"},
+    .{"fi"},
+    .{"for"},
+    .{"function"},
+    .{"if"},
+    .{"in"},
+    .{"select"},
+    .{"then"},
+    .{"until"},
+    .{"while"},
+    .{"{"},
+    .{"}"},
+    .{"time"},
+    .{"[["},
+    .{"]]"},
+});
 
 pub const BashToken = union(enum) {
     /// The most common type of token. The payload is usable as the content of token.
@@ -466,8 +543,8 @@ test "BashTokenizer" {
     try expectToken(.eof, try tokenizer.next());
 
     tokenizer = BashTokenizer.init(
-        // unquoted backslash:
-        "\\a\t\\$\n" ++
+    // unquoted backslash:
+    "\\a\t\\$\n" ++
         // quoted backaslash:
         \\"\a	\$\
         \\b
