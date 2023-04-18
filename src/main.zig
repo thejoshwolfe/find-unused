@@ -217,7 +217,18 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
     // (pretty sure you can't put newlines in the `command =` part of a ninja rule / build edge.)
     var sh_scripts_it = std.mem.tokenize(u8, ninja_output.items, "\n");
     while (sh_scripts_it.next()) |sh_script| {
-        try analyzeBashScript(arena, sh_script, &clang_commands);
+        analyzeBashScript(arena, sh_script, &clang_commands) catch |err| switch (err) {
+            error.UnsupportedBashFeature,
+            error.UnsupportedCdBeforeClangCommand,
+            error.UnsupportedReservedWord,
+            error.UnsupportedHistoryExpansion,
+            error.UnsupportedVariableAssignment,
+            => {
+                std.debug.print("ERROR: in bash script: {s}\n", .{sh_script});
+                return err;
+            },
+            else => return err,
+        };
     }
 
     // Analyze each clang command.
