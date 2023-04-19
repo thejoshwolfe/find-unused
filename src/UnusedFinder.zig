@@ -122,6 +122,10 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
         //  and that method is *not* implicit.)
         return;
     }
+    if (node.is_explicitly_deleted) {
+        // Well then I guess we won't complain about it being unused.
+        return;
+    }
 
     const id = try std.fmt.parseInt(u64, node.id, 0);
 

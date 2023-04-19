@@ -140,6 +140,8 @@ fn handleToken(self: *@This(), token: Token) !void {
                         self.expectBool(&self.node.is_used);
                     } else if (std.mem.eql(u8, key, "isImplicit")) {
                         self.expectBool(&self.node.is_implicit);
+                    } else if (std.mem.eql(u8, key, "explicitlyDeleted")) {
+                        self.expectBool(&self.node.is_explicitly_deleted);
                     } else if (std.mem.eql(u8, key, "previousDecl")) {
                         self.expectSlice(&self.node.previous_decl);
                     } else if (std.mem.eql(u8, key, "inner")) {
