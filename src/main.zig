@@ -224,8 +224,8 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
             error.UnsupportedHistoryExpansion,
             error.UnsupportedVariableAssignment,
             => {
-                std.debug.print("ERROR: in bash script: {s}\n", .{sh_script});
-                return err;
+                std.debug.print("WARNING: unsupported bash script: {s}\n", .{sh_script});
+                continue;
             },
             else => return err,
         };
