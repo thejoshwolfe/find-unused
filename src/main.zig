@@ -78,7 +78,7 @@ pub fn main() !void {
         }) orelse {
             printUsage("That clang command is out of scope.");
         };
-        defer gpa.destroy(cache_file);
+        defer gpa.free(cache_file);
 
         try std.io.getStdOut().writer().print("{s}\n", .{cache_file});
     } else if (ast_json) |json_path| {
@@ -264,7 +264,7 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
             const loc_i = try strings.putString(gpa, line.items[2..]);
             if (is_used) try used_locs.put(loc_i, {});
         }
-        gpa.destroy(cache_file);
+        gpa.free(cache_file);
     }
 
     var it = strings.dedup_table.keyIterator();

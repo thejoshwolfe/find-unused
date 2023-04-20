@@ -150,7 +150,14 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
         });
         loc_i = try self.strings.putString(self.allocator, loc_str);
     }
-    try self.id_to_loc.putNoClobber(self.allocator, id, loc_i);
+    const gop = try self.id_to_loc.getOrPut(self.allocator, id);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = loc_i;
+    } else {
+        // We have multiple definitions for the same node.
+        // They better have the same location info.
+        std.debug.assert(loc_i == gop.value_ptr.*);
+    }
 
     if (node.is_used) {
         _ = try self.used_locs.put(self.allocator, loc_i, {});

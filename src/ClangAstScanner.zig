@@ -1,3 +1,5 @@
+//! TODO: use the force. read the source: JSONNodeDumper.cpp
+//! Then we can know about "lookups" being unbounded and stuff.
 const std = @import("std");
 const StreamingParser = std.json.StreamingParser;
 const Token = std.json.Token;
@@ -148,6 +150,7 @@ fn handleToken(self: *@This(), token: Token) !void {
                         // "inner" is *always* the last property (if present), so we can correctly flush now.
                         try self.flushNode();
                         self.state = .inner;
+                        // TODO: "lookups" should flush the node, and then be ignored.
                     } else {
                         self.ignoreValue();
                     }
