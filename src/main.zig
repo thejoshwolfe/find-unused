@@ -147,7 +147,14 @@ fn analyzeAstJson(gpa: std.mem.Allocator, config: UnusedFinder.Config, input: an
         .config = config,
     };
     defer finder.deinit();
-    var scanner = ClangAstScanner{ .downstream = &finder };
+
+    var node_arena = std.heap.ArenaAllocator.init(gpa);
+    defer node_arena.deinit();
+
+    var scanner = ClangAstScanner{
+        .downstream = &finder,
+        .node_arena = node_arena,
+    };
     scanner.consume(input) catch |err| {
         std.debug.print("line,col: {},{}\n", .{ scanner.line_number, scanner.column_number });
         return err;

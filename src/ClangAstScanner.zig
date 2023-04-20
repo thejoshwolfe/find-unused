@@ -1,5 +1,5 @@
-//! TODO: use the force. read the source: JSONNodeDumper.cpp
-//! Then we can know about "lookups" being unbounded and stuff.
+//! TODO: the "documentation" for the json "schema" is here: JSONNodeDumper.cpp
+//! Audit that to see if there's anything we care about.
 const std = @import("std");
 const StreamingParser = std.json.StreamingParser;
 const Token = std.json.Token;
@@ -23,13 +23,17 @@ dest_field_bool: *bool = undefined,
 dest_field_slice: *[]const u8 = undefined,
 
 node: ClangAstNode = .{},
-node_count: u32 = 0,
 
 tokenizer: StreamingParser = StreamingParser.init(),
-buffer: [buffer_size]u8 = undefined,
+input_buffer: [buffer_size]u8 = undefined,
 
-const buffer_size = 0x100_000;
-const min_unit_size = 0x10_000;
+node_arena: std.heap.ArenaAllocator,
+
+/// Only matters for performance.
+const buffer_size = 0x10_000;
+/// This is the limit on how long a string value can be.
+/// Also, the smaller it is, the better the performance.
+const min_unit_size = 0x1_000;
 
 const State = enum {
     outside_node,
@@ -46,7 +50,7 @@ const State = enum {
 
 pub fn consume(self: *@This(), input: anytype) !void {
     while (true) {
-        if (self.write_cursor - self.read_cursor < min_unit_size and self.state == .outside_node) {
+        if (self.write_cursor - self.read_cursor < min_unit_size and self.isSafeToMoveBuffer()) {
             // Not enough buffered.
             if (!self.input_at_eof) {
                 try self.refill(input);
@@ -63,42 +67,42 @@ pub fn consume(self: *@This(), input: anytype) !void {
                 }
             }
         } else if (self.read_cursor >= self.write_cursor) {
-            return error.NodeTooBig;
+            return error.ValueTooLong;
         }
 
-        // Consume 1 byte.
+        // Take 1 byte.
+        const c = self.input_buffer[self.read_cursor];
+        self.read_cursor += 1;
+        if (c == '\n') {
+            self.line_number += 1;
+            self.column_number = 1;
+        } else {
+            self.column_number += 1;
+        }
+
+        // Consume the delicious byte.
         var token: ?Token = undefined;
         var second_token: ?Token = undefined;
-        const c = self.buffer[self.read_cursor];
-        defer {
-            if (c == '\n') {
-                self.line_number += 1;
-                self.column_number = 1;
-            } else {
-                self.column_number += 1;
-            }
-        }
         try self.tokenizer.feed(c, &token, &second_token);
-        self.read_cursor += 1;
         if (token) |t| {
             try self.handleToken(t);
-        } else {
-            continue;
+            if (second_token) |t2| {
+                try self.handleToken(t2);
+            }
         }
-        if (second_token) |t| try self.handleToken(t);
     }
 }
 
 fn refill(self: *@This(), input: anytype) !void {
-    // Retain anything still in the buffer.
+    // Retain anything still in the input_buffer.
     if (self.read_cursor > 0) {
-        std.mem.copyBackwards(u8, self.buffer[0..], self.buffer[self.read_cursor..self.write_cursor]);
+        std.mem.copyBackwards(u8, self.input_buffer[0..], self.input_buffer[self.read_cursor..self.write_cursor]);
         self.write_cursor -= self.read_cursor;
         self.read_cursor = 0;
     }
 
     while (self.write_cursor < buffer_size - min_unit_size) {
-        const written = try input.read(self.buffer[self.write_cursor..]);
+        const written = try input.read(self.input_buffer[self.write_cursor..]);
         if (written == 0) {
             self.input_at_eof = true;
             break;
@@ -150,7 +154,6 @@ fn handleToken(self: *@This(), token: Token) !void {
                         // "inner" is *always* the last property (if present), so we can correctly flush now.
                         try self.flushNode();
                         self.state = .inner;
-                        // TODO: "lookups" should flush the node, and then be ignored.
                     } else {
                         self.ignoreValue();
                     }
@@ -196,8 +199,8 @@ fn handleToken(self: *@This(), token: Token) !void {
         },
         .expect_slice => {
             switch (token) {
-                .String => |string_token| self.dest_field_slice.* = self.tokenSlice(string_token),
-                .Number => |number_token| self.dest_field_slice.* = self.tokenSlice(number_token),
+                .String => |string_token| self.dest_field_slice.* = try self.node_arena.allocator().dupe(u8, self.tokenSlice(string_token)),
+                .Number => |number_token| self.dest_field_slice.* = try self.node_arena.allocator().dupe(u8, self.tokenSlice(number_token)),
                 else => return error.ExpectedStringOrNumber,
             }
             self.nextState();
@@ -263,10 +266,60 @@ fn nextState(self: *@This()) void {
 
 fn flushNode(self: *@This()) !void {
     try self.downstream.handleNode(self.node);
+
     self.node = .{};
-    self.node_count += 1;
+    _ = self.node_arena.reset(.retain_capacity);
 }
 
 fn tokenSlice(self: *const @This(), string_or_number_token: anytype) []const u8 {
-    return string_or_number_token.slice(self.buffer[0..], self.read_cursor - 1);
+    return string_or_number_token.slice(self.input_buffer[0..], self.read_cursor - 1);
+}
+
+fn isSafeToMoveBuffer(self: *const @This()) bool {
+    return switch (self.tokenizer.state) {
+        .ObjectSeparator,
+        .ValueEnd,
+        .TopLevelBegin,
+        .TopLevelEnd,
+        .ValueBegin,
+        .ValueBeginNoClosing,
+        => true,
+
+        .String,
+        .StringUtf8Byte2Of2,
+        .StringUtf8Byte2Of3,
+        .StringUtf8Byte3Of3,
+        .StringUtf8Byte2Of4,
+        .StringUtf8Byte3Of4,
+        .StringUtf8Byte4Of4,
+        .StringEscapeCharacter,
+        .StringEscapeHexUnicode4,
+        .StringEscapeHexUnicode3,
+        .StringEscapeHexUnicode2,
+        .StringEscapeHexUnicode1,
+        => false,
+
+        .Number,
+        .NumberMaybeDotOrExponent,
+        .NumberMaybeDigitOrDotOrExponent,
+        .NumberFractionalRequired,
+        .NumberFractional,
+        .NumberMaybeExponent,
+        .NumberExponent,
+        .NumberExponentDigitsRequired,
+        .NumberExponentDigits,
+        => false,
+
+        .TrueLiteral1,
+        .TrueLiteral2,
+        .TrueLiteral3,
+        .FalseLiteral1,
+        .FalseLiteral2,
+        .FalseLiteral3,
+        .FalseLiteral4,
+        .NullLiteral1,
+        .NullLiteral2,
+        .NullLiteral3,
+        => true,
+    };
 }
