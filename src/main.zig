@@ -1,7 +1,9 @@
 const std = @import("std");
 
+const Diagnostics = @import("./json.zig").Diagnostics;
+
 const UnusedFinder = @import("./UnusedFinder.zig");
-const ClangAstScanner = @import("./ClangAstScanner.zig");
+const clangAstScanner = @import("./clang_ast_scanner.zig").clangAstScanner;
 
 const parseClangCli = @import("./clang_cli_parser.zig").parseClangCli;
 const ClangCommand = @import("./clang_cli_parser.zig").ClangCommand;
@@ -148,17 +150,17 @@ fn analyzeAstJson(gpa: std.mem.Allocator, config: UnusedFinder.Config, input: an
     };
     defer finder.deinit();
 
-    var node_arena = std.heap.ArenaAllocator.init(gpa);
-    defer node_arena.deinit();
+    var scanner = clangAstScanner(gpa, input);
+    defer scanner.deinit();
+    var diagnostics = Diagnostics{};
+    scanner.enableDiagnostics(&diagnostics);
 
-    var scanner = ClangAstScanner{
-        .downstream = &finder,
-        .node_arena = node_arena,
-    };
-    scanner.consume(input) catch |err| {
-        std.debug.print("line,col: {},{}\n", .{ scanner.line_number, scanner.column_number });
+    while (scanner.next() catch |err| {
+        std.debug.print("line,col: {},{}\n", .{ diagnostics.getLine(), diagnostics.getColumn() });
         return err;
-    };
+    }) |node| {
+        try finder.handleNode(node);
+    }
 
     // Report stuff.
     var it = finder.iterator();
