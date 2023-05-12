@@ -14,7 +14,7 @@ const StringPool = @import("./StringPool.zig");
 pub fn main() !void {
     var _gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
-        if (_gpa.deinit()) {
+        if (_gpa.deinit() != .ok) {
             std.debug.print("WARNING: memory leaks\n", .{});
         }
     }

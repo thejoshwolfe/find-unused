@@ -3,7 +3,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const JsonReader = @import("./json.zig").JsonReader;
+const JsonReader = @import("./json.zig").Reader;
 const default_buffer_size = @import("./json.zig").default_buffer_size;
 const Token = @import("./json.zig").Token;
 const Diagnostics = @import("./json.zig").Diagnostics;
