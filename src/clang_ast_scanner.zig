@@ -3,11 +3,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const JsonReader = @import("./json.zig").Reader;
-const default_buffer_size = @import("./json.zig").default_buffer_size;
-const Token = @import("./json.zig").Token;
-const Diagnostics = @import("./json.zig").Diagnostics;
-const AllocWhen = @import("./json.zig").AllocWhen;
+const JsonReader = std.json.Reader;
+const default_buffer_size = std.json.default_buffer_size;
+const Token = std.json.Token;
+const Diagnostics = std.json.Diagnostics;
+const AllocWhen = std.json.AllocWhen;
 
 const ClangAstNode = @import("./ClangAstNode.zig");
 

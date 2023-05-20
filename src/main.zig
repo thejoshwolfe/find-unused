@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Diagnostics = @import("./json.zig").Diagnostics;
+const Diagnostics = std.json.Diagnostics;
 
 const UnusedFinder = @import("./UnusedFinder.zig");
 const clangAstScanner = @import("./clang_ast_scanner.zig").clangAstScanner;
