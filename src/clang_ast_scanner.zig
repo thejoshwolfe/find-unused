@@ -56,23 +56,7 @@ pub fn ClangAstScanner(comptime Reader: type) type {
                 } else if (std.mem.eql(u8, key, "kind")) {
                     node.kind = try self.nextSlice(.alloc_always);
                 } else if (std.mem.eql(u8, key, "loc")) {
-                    if (.object_begin != try self.json_reader.next()) return error.UnexpectedToken;
-                    while (try self.stillInObject()) {
-                        if (.object_end == try self.json_reader.peekNextTokenType()) {
-                            _ = try self.json_reader.next();
-                            break;
-                        }
-                        key = try self.nextSlice(.alloc_if_needed);
-                        if (std.mem.eql(u8, key, "file")) {
-                            node.file = try self.nextSlice(.alloc_always);
-                        } else if (std.mem.eql(u8, key, "line")) {
-                            node.line = try self.nextSlice(.alloc_always);
-                        } else if (std.mem.eql(u8, key, "col")) {
-                            node.col = try self.nextSlice(.alloc_always);
-                        } else {
-                            try self.json_reader.skipValue();
-                        }
-                    }
+                    try self.parseLocation(&node.location, &node.secondary_locaction, true);
                 } else if (std.mem.eql(u8, key, "isUsed")) {
                     node.is_used = try self.nextBool();
                 } else if (std.mem.eql(u8, key, "isImplicit")) {
@@ -81,6 +65,8 @@ pub fn ClangAstScanner(comptime Reader: type) type {
                     node.is_explicitly_deleted = try self.nextBool();
                 } else if (std.mem.eql(u8, key, "previousDecl")) {
                     node.previous_decl = try self.nextSlice(.alloc_always);
+                } else if (std.mem.eql(u8, key, "mangledName")) {
+                    node.mangled_name = try self.nextSlice(.alloc_always);
                 } else if (std.mem.eql(u8, key, "inner")) {
                     // "inner" is *always* the last property (if present), so we can correctly be done now.
                     // Jump into the array so we find a node next.
@@ -93,6 +79,38 @@ pub fn ClangAstScanner(comptime Reader: type) type {
             }
 
             return node;
+        }
+
+        fn parseLocation(self: *@This(), out_location: *ClangAstNode.Location, out_secondary_location: *ClangAstNode.Location, comptime allow_recursion: bool) !void {
+            if (.object_begin != try self.json_reader.next()) return error.UnexpectedToken;
+            while (try self.stillInObject()) {
+                if (.object_end == try self.json_reader.peekNextTokenType()) {
+                    _ = try self.json_reader.next();
+                    break;
+                }
+                var key = try self.nextSlice(.alloc_if_needed);
+                if (std.mem.eql(u8, key, "file")) {
+                    out_location.file = try self.nextSlice(.alloc_always);
+                } else if (std.mem.eql(u8, key, "line")) {
+                    out_location.line = try self.nextSlice(.alloc_always);
+                } else if (std.mem.eql(u8, key, "presumedFile")) {
+                    out_location.presumed_file = try self.nextSlice(.alloc_always);
+                } else if (std.mem.eql(u8, key, "presumedLine")) {
+                    out_location.presumed_line = try self.nextSlice(.alloc_always);
+                } else if (std.mem.eql(u8, key, "col")) {
+                    out_location.col = try self.nextSlice(.alloc_always);
+                } else if (std.mem.eql(u8, key, "expansionLoc")) {
+                    if (!allow_recursion) return error.UnexpectedToken;
+                    // The expansion loc is where the compiler's "cursor" is, so it's the primary one.
+                    try self.parseLocation(out_location, undefined, false);
+                } else if (std.mem.eql(u8, key, "spellingLoc")) {
+                    if (!allow_recursion) return error.UnexpectedToken;
+                    // The spelling loc is where the macro is defined.
+                    try self.parseLocation(out_secondary_location, undefined, false);
+                } else {
+                    try self.json_reader.skipValue();
+                }
+            }
         }
 
         fn nextSlice(self: *@This(), alloc_when: AllocWhen) ![]const u8 {

@@ -57,6 +57,7 @@ config: Config,
 // tables of info
 strings: StringPool = .{},
 id_to_loc: std.AutoHashMapUnmanaged(u64, u32) = .{},
+id_to_secondary_loc: std.AutoHashMapUnmanaged(u64, u32) = .{},
 used_locs: std.AutoHashMapUnmanaged(u32, void) = .{},
 
 // bookkeeping buffers
@@ -68,6 +69,7 @@ current_file_buf: [4096]u8 = undefined,
 pub fn deinit(self: *@This()) void {
     self.strings.deinit(self.allocator);
     self.id_to_loc.deinit(self.allocator);
+    self.id_to_secondary_loc.deinit(self.allocator);
     self.used_locs.deinit(self.allocator);
     self.* = undefined;
 }
@@ -109,9 +111,7 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
 
     if (!kinds_of_interest.has(node.kind)) return;
 
-    const col = node.col;
-
-    if (self.current_file.len == 0 or self.current_line.len == 0 or col.len == 0) {
+    if (self.current_file.len == 0 or self.current_line.len == 0 or node.location.col.len == 0) {
         // Nodes without loc info are out of scope for this analysis.
         // e.g. compiler builtins.
         return;
@@ -130,6 +130,7 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
     const id = try std.fmt.parseInt(u64, node.id, 0);
 
     var loc_i: u32 = undefined;
+    var secondary_loc_i: ?u32 = null;
     if (node.previous_decl.len > 0) {
         // This is the definition of a previously prototyped function.
         // Use the prototype location as the true location.
@@ -139,6 +140,10 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
         } else {
             // Sometimes clang emits completely bogus dead pointers. Not even defined later.
             // Just ignore them.
+            return;
+        }
+        if (self.id_to_secondary_loc.get(previous_id)) |previous_loc_i| {
+            secondary_loc_i = previous_loc_i;
         }
     } else {
         // New location.
@@ -146,9 +151,27 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
         const loc_str = try std.fmt.bufPrint(loc_buf[0..], "{s}:{s}:{s}", .{
             self.current_file,
             self.current_line,
-            node.col,
+            node.location.col,
         });
         loc_i = try self.strings.putString(self.allocator, loc_str);
+
+        if (node.secondary_locaction.col.len > 0) {
+            // Secondary location.
+            var file = self.current_file;
+            if (node.secondary_locaction.file.len > 0) {
+                file = node.secondary_locaction.file;
+            }
+            var line = self.current_line;
+            if (node.secondary_locaction.line.len > 0) {
+                line = node.secondary_locaction.line;
+            }
+            const second_loc_str = try std.fmt.bufPrint(loc_buf[0..], "{s}:{s}:{s}", .{
+                file,
+                line,
+                node.location.col,
+            });
+            secondary_loc_i = try self.strings.putString(self.allocator, second_loc_str);
+        }
     }
     const gop = try self.id_to_loc.getOrPut(self.allocator, id);
     if (!gop.found_existing) {
@@ -158,27 +181,51 @@ pub fn handleNode(self: *@This(), node: ClangAstNode) !void {
         // They better have the same location info.
         std.debug.assert(loc_i == gop.value_ptr.*);
     }
+    if (secondary_loc_i) |second_loc_i| {
+        const second_gop = try self.id_to_secondary_loc.getOrPut(self.allocator, id);
+        if (!second_gop.found_existing) {
+            second_gop.value_ptr.* = second_loc_i;
+        } else {
+            std.debug.assert(second_loc_i == second_gop.value_ptr.*);
+        }
+    }
 
-    if (node.is_used) {
+    if (node.is_used or std.mem.eql(u8, node.mangled_name, "main")) {
         _ = try self.used_locs.put(self.allocator, loc_i, {});
+        if (secondary_loc_i) |second_loc_i| {
+            _ = try self.used_locs.put(self.allocator, second_loc_i, {});
+        }
     }
 }
 
 fn recordLocInfo(self: *@This(), node: ClangAstNode) !void {
-    if (node.file.len > 0) {
+    var file = node.location.file;
+    if (node.location.presumed_file.len > 0) {
+        // Prefer the presumed location, which is determined by `# 123 /path/to/file.in` directives.
+        // These are often emitted by code generators that output C/C++ code from some other source,
+        // so the maintainers would probably want to know the origin of the function,
+        // not its intermediate location in the build directory.
+        file = node.location.presumed_file;
+    }
+    if (file.len > 0) {
         // Resolve the path to the canonical form that we want.
         var buf: [0x2000]u8 = undefined;
         var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&buf);
         var allocator = fixed_buffer_allocator.allocator();
-
-        var file = try self.config.resolvePath(allocator, node.file);
+        file = try self.config.resolvePath(allocator, file);
 
         // Save the canonicalized name, even if it's "".
         try self.saveStr(file, &self.current_file_buf, &self.current_file);
     }
 
-    if (self.current_file.len > 0 and node.line.len > 0) {
-        try self.saveStr(node.line, &self.current_line_buf, &self.current_line);
+    if (self.current_file.len > 0) {
+        var line = node.location.line;
+        if (node.location.presumed_line.len > 0) {
+            line = node.location.presumed_line;
+        }
+        if (line.len > 0) {
+            try self.saveStr(line, &self.current_line_buf, &self.current_line);
+        }
     }
 }
 fn saveStr(_: *const @This(), src: []const u8, buf: anytype, dest_slice: *[]const u8) !void {

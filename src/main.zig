@@ -75,7 +75,7 @@ pub fn main() !void {
             try clang_cmd.append(arg);
         }
 
-        const cache_file = try analyzeClangCommand(gpa, config, trust_cache, parseClangCli(try clang_cmd.toOwnedSlice()) orelse {
+        const cache_file = try analyzeClangCommand(gpa, config, trust_cache, parseClangCli(clang_cmd.items) orelse {
             printUsage("That's not a clang command.");
         }) orelse {
             printUsage("That clang command is out of scope.");
