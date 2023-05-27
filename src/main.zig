@@ -116,11 +116,11 @@ fn analyzeClangCommand(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
     {
         std.debug.getStderrMutex().lock();
         defer std.debug.getStderrMutex().unlock();
-        try std.io.getStdOut().writer().print("Analyzing:", .{});
+        try std.io.getStdErr().writer().print("Analyzing:", .{});
         for (ast_dump_cmd.items) |arg| {
-            try std.io.getStdOut().writer().print(" {s}", .{arg});
+            try std.io.getStdErr().writer().print(" {s}", .{arg});
         }
-        try std.io.getStdOut().writer().print("\n", .{});
+        try std.io.getStdErr().writer().print("\n", .{});
     }
     var clang = std.ChildProcess.init(ast_dump_cmd.items, arena);
     clang.stdout_behavior = .Pipe;
@@ -167,7 +167,7 @@ fn analyzeClangCommandIntoArrayList(
     {
         std.debug.getStderrMutex().lock();
         defer std.debug.getStderrMutex().unlock();
-        try std.io.getStdOut().writer().print("[{}/{}] {s}\n", .{ i, len, cache_file });
+        try std.io.getStdErr().writer().print("[{}/{}] {s}\n", .{ i, len, cache_file });
     }
     try cache_files.append(cache_file);
 }
@@ -355,18 +355,19 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
             const loc_i = try strings.putString(gpa, line.items[2..]);
             if (is_used) try used_locs.put(loc_i, {});
         }
-        gpa.free(cache_file);
     }
 
+    var out = std.io.bufferedWriter(std.io.getStdOut().writer());
     var it = strings.dedup_table.keyIterator();
     while (it.next()) |loc_i| {
         const loc = strings.getString(loc_i.*);
         const is_used = used_locs.contains(loc_i.*);
-        try std.io.getStdOut().writer().print("{} {s}\n", .{
+        try out.writer().print("{} {s}\n", .{
             @boolToInt(is_used),
             loc,
         });
     }
+    try out.flush();
 }
 
 fn analyzeBashScript(arena: std.mem.Allocator, bash_script: []const u8, clang_commands: *std.ArrayList(ClangCommand)) !void {
