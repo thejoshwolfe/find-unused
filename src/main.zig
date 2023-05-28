@@ -357,11 +357,21 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
         }
     }
 
+    // Sort the output.
+    var sorted = try arena.alloc(u32, strings.dedup_table.size);
+    {
+        var it = strings.dedup_table.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |loc_i| : (i += 1) {
+            sorted[i] = loc_i.*;
+        }
+        std.sort.sort(u32, sorted, LocSortingContext{ .strings = strings }, LocSortingContext.lessThan);
+    }
+
     var out = std.io.bufferedWriter(std.io.getStdOut().writer());
-    var it = strings.dedup_table.keyIterator();
-    while (it.next()) |loc_i| {
-        const loc = strings.getString(loc_i.*);
-        const is_used = used_locs.contains(loc_i.*);
+    for (sorted) |loc_i| {
+        const loc = strings.getString(loc_i);
+        const is_used = used_locs.contains(loc_i);
         try out.writer().print("{} {s}\n", .{
             @boolToInt(is_used),
             loc,
@@ -399,6 +409,57 @@ fn isCacheFresh(output_file: []const u8, cache_file: []const u8) !bool {
     return output_stat.mtime < cache_stat.mtime;
 }
 
+/// order strings by file, then by line, then by col.
+const LocSortingContext = struct {
+    strings: StringPool,
+
+    fn lessThan(self: @This(), a_i: u32, b_i: u32) bool {
+        const a = self.strings.getString(a_i);
+        const b = self.strings.getString(b_i);
+        const a_parts = splitLocStr(a);
+        const b_parts = splitLocStr(b);
+
+        // file
+        switch (std.mem.order(u8, a_parts[0], b_parts[0])) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        // line
+        switch (orderNormalizedUnsignedNumericStr(a_parts[1], b_parts[1])) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        // col
+        switch (orderNormalizedUnsignedNumericStr(a_parts[2], b_parts[2])) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        return false; // equal
+    }
+
+    fn splitLocStr(loc: []const u8) [3][]const u8 {
+        const pos_2 = std.mem.lastIndexOfScalar(u8, loc, ':').?;
+        const pos_1 = lastIndexOfScalarPos(u8, loc, pos_2, ':').?;
+        return [3][]const u8{
+            loc[0..pos_1],
+            loc[pos_1 + 1 .. pos_2],
+            loc[pos_2 + 1 ..],
+        };
+    }
+
+    fn orderNormalizedUnsignedNumericStr(a: []const u8, b: []const u8) std.math.Order {
+        switch (std.math.order(a.len, b.len)) {
+            .lt => return .lt,
+            .gt => return .gt,
+            .eq => {},
+        }
+        return std.mem.order(u8, a, b);
+    }
+};
+
 /// How is this not in the std lib?
 fn statFileAbsolute(file_path: []const u8) std.fs.File.OpenError!std.fs.File.Stat {
     var file = try std.fs.openFileAbsolute(file_path, .{});
@@ -414,4 +475,14 @@ fn pump(reader: anytype, writer: anytype) !void {
         if (amount == 0) break;
         try writer.writeAll(buf[0..amount]);
     }
+}
+
+/// How is this not in the std lib?
+pub fn lastIndexOfScalarPos(comptime T: type, slice: []const T, start_index: usize, value: T) ?usize {
+    var i: usize = start_index;
+    while (i != 0) {
+        i -= 1;
+        if (slice[i] == value) return i;
+    }
+    return null;
 }
