@@ -365,7 +365,7 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
         while (it.next()) |loc_i| : (i += 1) {
             sorted[i] = loc_i.*;
         }
-        std.sort.sort(u32, sorted, LocSortingContext{ .strings = strings }, LocSortingContext.lessThan);
+        std.sort.block(u32, sorted, LocSortingContext{ .strings = strings }, LocSortingContext.lessThan);
     }
 
     var out = std.io.bufferedWriter(std.io.getStdOut().writer());
