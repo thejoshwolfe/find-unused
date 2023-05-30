@@ -31,7 +31,7 @@ pub fn main() !void {
     };
     var exclude_list = std.ArrayList([]const u8).init(config_arena);
     var clang_command_on_cli = false;
-    var trust_cache = false;
+    var trust_cache = true;
     var ast_json: ?[]const u8 = null;
 
     var args = std.process.args();
@@ -52,8 +52,8 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--ast-json")) {
             if (clang_command_on_cli) printUsage("cannot use both --clang-cmd and --ast-json");
             ast_json = args.next() orelse printUsage("expected arg after --ast-json");
-        } else if (std.mem.eql(u8, arg, "--trust-cache")) {
-            trust_cache = true;
+        } else if (std.mem.eql(u8, arg, "--no-trust-cache")) {
+            trust_cache = false;
         } else {
             printUsageFmt("unrecognized argument: {s}", .{arg});
         }
@@ -99,13 +99,9 @@ fn analyzeClangCommand(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
     if ((try config.resolvePath(arena, clang_command.source_file)).len == 0) return null;
     const _output_file = try std.fs.path.join(arena, &[_][]const u8{ config.build_dir, clang_command.output_file });
     const cache_file = try std.mem.concat(gpa, u8, &[_][]const u8{ _output_file, ".find-unused-cache" });
-    if (trust_cache) {
-        if (std.fs.accessAbsolute(cache_file, .{})) |_| {
-            // File exists.
-            return cache_file;
-        } else |_| {
-            // Does not exist.
-        }
+    errdefer gpa.free(cache_file);
+    if (trust_cache and try isCacheFresh(_output_file, cache_file)) {
+        return cache_file;
     }
     const cache_file_tmp = try std.mem.concat(arena, u8, &[_][]const u8{ cache_file, ".tmp" });
 
@@ -117,10 +113,15 @@ fn analyzeClangCommand(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
     var ast_dump_cmd = try std.ArrayList([]const u8).initCapacity(arena, clang_command.complete_cmd.len + additional_clang_args.len);
     ast_dump_cmd.appendSliceAssumeCapacity(clang_command.complete_cmd);
     ast_dump_cmd.appendSliceAssumeCapacity(additional_clang_args);
-    for (ast_dump_cmd.items) |arg| {
-        try std.io.getStdOut().writer().print(" {s}", .{arg});
+    {
+        std.debug.getStderrMutex().lock();
+        defer std.debug.getStderrMutex().unlock();
+        try std.io.getStdErr().writer().print("Analyzing:", .{});
+        for (ast_dump_cmd.items) |arg| {
+            try std.io.getStdErr().writer().print(" {s}", .{arg});
+        }
+        try std.io.getStdErr().writer().print("\n", .{});
     }
-    try std.io.getStdOut().writer().print("\n", .{});
     var clang = std.ChildProcess.init(ast_dump_cmd.items, arena);
     clang.stdout_behavior = .Pipe;
     clang.cwd = config.build_dir;
@@ -141,6 +142,58 @@ fn analyzeClangCommand(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
     try std.os.rename(cache_file_tmp, cache_file);
 
     return cache_file;
+}
+
+fn analyzeClangCommandIntoArrayList(
+    gpa: std.mem.Allocator,
+    config: UnusedFinder.Config,
+    trust_cache: bool,
+    clang_command: ClangCommand,
+    cache_files: *std.ArrayList([]const u8),
+    i: usize,
+    len: usize,
+) !void {
+    const cache_file = analyzeClangCommand(gpa, config, trust_cache, clang_command) catch |err| {
+        std.debug.print("For clang command:", .{});
+        for (clang_command.complete_cmd) |arg| {
+            std.debug.print(" {s}", .{arg});
+        }
+        std.debug.print("\n", .{});
+        std.debug.print("  source: {s}\n", .{clang_command.source_file});
+        std.debug.print("  output: {s}\n", .{clang_command.output_file});
+        return err;
+    } orelse return;
+    errdefer gpa.free(cache_file);
+    {
+        std.debug.getStderrMutex().lock();
+        defer std.debug.getStderrMutex().unlock();
+        try std.io.getStdErr().writer().print("[{}/{}] {s}\n", .{ i, len, cache_file });
+    }
+    try cache_files.append(cache_file);
+}
+fn analyzeClangCommandVoid(
+    gpa: std.mem.Allocator,
+    config: UnusedFinder.Config,
+    trust_cache: bool,
+    clang_command: ClangCommand,
+    cache_files: *std.ArrayList([]const u8),
+    i: usize,
+    len: usize,
+    out_err: *?anyerror,
+    wg: *std.Thread.WaitGroup,
+) void {
+    defer wg.finish();
+    analyzeClangCommandIntoArrayList(
+        gpa,
+        config,
+        trust_cache,
+        clang_command,
+        cache_files,
+        i,
+        len,
+    ) catch |err| {
+        out_err.* = err;
+    };
 }
 
 fn analyzeAstJson(gpa: std.mem.Allocator, config: UnusedFinder.Config, input: anytype, output: anytype) !void {
@@ -242,11 +295,40 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
 
     // Analyze each clang command.
     var cache_files = std.ArrayList([]const u8).init(arena);
-    for (clang_commands.items) |clang_command| {
-        const cache_file = try analyzeClangCommand(gpa, config, trust_cache, clang_command) orelse continue;
-        try std.io.getStdOut().writer().print("{s}\n", .{cache_file});
-        try cache_files.append(cache_file);
+    defer {
+        for (cache_files.items) |cache_file| {
+            gpa.free(cache_file);
+        }
     }
+
+    var thread_pool: std.Thread.Pool = undefined;
+    try thread_pool.init(.{ .allocator = gpa });
+    defer thread_pool.deinit();
+    var wg = std.Thread.WaitGroup{};
+    var any_err: ?anyerror = null;
+
+    {
+        wg.reset();
+        defer wg.wait();
+        for (clang_commands.items, 0..) |clang_command, i| {
+            wg.start();
+            try thread_pool.spawn(
+                analyzeClangCommandVoid,
+                .{
+                    gpa,
+                    config,
+                    trust_cache,
+                    clang_command,
+                    &cache_files,
+                    clang_commands.items.len - i,
+                    clang_commands.items.len,
+                    &any_err,
+                    &wg,
+                },
+            );
+        }
+    }
+    if (any_err) |err| return err;
 
     // Aggregate results from the cache files.
     var strings = StringPool{};
@@ -273,18 +355,19 @@ fn analyzeNinjaProject(gpa: std.mem.Allocator, config: UnusedFinder.Config, trus
             const loc_i = try strings.putString(gpa, line.items[2..]);
             if (is_used) try used_locs.put(loc_i, {});
         }
-        gpa.free(cache_file);
     }
 
+    var out = std.io.bufferedWriter(std.io.getStdOut().writer());
     var it = strings.dedup_table.keyIterator();
     while (it.next()) |loc_i| {
         const loc = strings.getString(loc_i.*);
         const is_used = used_locs.contains(loc_i.*);
-        try std.io.getStdOut().writer().print("{} {s}\n", .{
+        try out.writer().print("{} {s}\n", .{
             @boolToInt(is_used),
             loc,
         });
     }
+    try out.flush();
 }
 
 fn analyzeBashScript(arena: std.mem.Allocator, bash_script: []const u8, clang_commands: *std.ArrayList(ClangCommand)) !void {
@@ -308,6 +391,19 @@ fn analyzeBashScript(arena: std.mem.Allocator, bash_script: []const u8, clang_co
     }
 
     if (found_clang_command and unsupported_cd) return error.UnsupportedCdBeforeClangCommand;
+}
+
+fn isCacheFresh(output_file: []const u8, cache_file: []const u8) !bool {
+    var output_stat = try statFileAbsolute(output_file);
+    var cache_stat = statFileAbsolute(cache_file) catch return false;
+    return output_stat.mtime < cache_stat.mtime;
+}
+
+/// How is this not in the std lib?
+fn statFileAbsolute(file_path: []const u8) std.fs.File.OpenError!std.fs.File.Stat {
+    var file = try std.fs.openFileAbsolute(file_path, .{});
+    defer file.close();
+    return file.stat();
 }
 
 /// How is this not in the std lib?
